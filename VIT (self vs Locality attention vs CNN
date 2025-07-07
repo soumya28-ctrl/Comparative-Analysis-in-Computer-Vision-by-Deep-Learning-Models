@@ -1,0 +1,382 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.datasets import mnist
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras import layers, models
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+
+# Load and preprocess MNIST
+(x_train, y_train), (x_test, y_test) = mnist.load_data()
+x_train = x_train.reshape(-1, 28, 28, 1).astype("float32") / 255.0
+x_test = x_test.reshape(-1, 28, 28, 1).astype("float32") / 255.0
+y_train_cat = to_categorical(y_train, 10)
+y_test_cat = to_categorical(y_test, 10)
+
+def run_model(name, model_fn):
+    print(f"\n=== Running {name} ===")
+    model = model_fn()
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+    history = model.fit(
+        x_train, y_train_cat,
+        batch_size=64,
+        epochs=10,
+        validation_split=0.1,
+        verbose=0
+    )
+
+    loss, acc = model.evaluate(x_test, y_test_cat, verbose=0)
+    y_pred = np.argmax(model.predict(x_test, verbose=0), axis=1)
+    print(f"{name} - Test Accuracy: {acc:.4f}, Loss: {loss:.4f}")
+    return history, y_pred
+
+# CNN Model
+def cnn_model():
+    model = models.Sequential([
+        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(28, 28, 1)),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(10, activation='softmax')
+    ])
+    return model
+
+# Vision Transformer (ViT)
+def vit_model():
+    projection_dim = 64
+    num_heads = 4
+    patch_size = 7
+    num_patches = (28 // patch_size) ** 2
+
+    class Patches(layers.Layer):
+        def __init__(self, patch_size):
+            super().__init__()
+            self.patch_size = patch_size
+
+        def call(self, images):
+            patches = tf.image.extract_patches(
+                images=images,
+                sizes=[1, self.patch_size, self.patch_size, 1],
+                strides=[1, self.patch_size, self.patch_size, 1],
+                rates=[1, 1, 1, 1],
+                padding="VALID"
+            )
+            return tf.reshape(patches, [tf.shape(images)[0], -1, patches.shape[-1]])
+
+    class PatchEncoder(layers.Layer):
+        def __init__(self, num_patches, projection_dim):
+            super().__init__()
+            self.projection = layers.Dense(projection_dim)
+            self.position_embedding = layers.Embedding(input_dim=num_patches, output_dim=projection_dim)
+
+        def call(self, patches):
+            positions = tf.range(start=0, limit=num_patches, delta=1)
+            return self.projection(patches) + self.position_embedding(positions)
+
+    inputs = layers.Input(shape=(28, 28, 1))
+    x = Patches(patch_size)(inputs)
+    x = PatchEncoder(num_patches, projection_dim)(x)
+
+    for _ in range(4):
+        x1 = layers.LayerNormalization(epsilon=1e-6)(x)
+        attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=projection_dim)(x1, x1)
+        x2 = layers.Add()([x, attn])
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        x3 = layers.Dense(128, activation='relu')(x3)
+        x3 = layers.Dense(projection_dim)(x3)
+        x = layers.Add()([x2, x3])
+
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation='relu')(x)
+    outputs = layers.Dense(10, activation='softmax')(x)
+    return models.Model(inputs, outputs)
+
+# Local ViT with shifted patches
+def local_vit_model():
+    projection_dim = 64
+    patch_size = 7
+    stride = 4
+    num_heads = 4
+    num_patches = ((28 - patch_size) // stride + 1) ** 2
+
+    class ShiftedPatches(layers.Layer):
+        def __init__(self, patch_size, stride):
+            super().__init__()
+            self.patch_size = patch_size
+            self.stride = stride
+
+        def call(self, images):
+            patches = tf.image.extract_patches(
+                images=images,
+                sizes=[1, self.patch_size, self.patch_size, 1],
+                strides=[1, self.stride, self.stride, 1],
+                rates=[1, 1, 1, 1],
+                padding="VALID"
+            )
+            return tf.reshape(patches, [tf.shape(images)[0], -1, patches.shape[-1]])
+
+    class PatchEncoder(layers.Layer):
+        def __init__(self, num_patches, projection_dim):
+            super().__init__()
+            self.projection = layers.Dense(projection_dim)
+            self.position_embedding = layers.Embedding(input_dim=num_patches, output_dim=projection_dim)
+
+        def call(self, patches):
+            positions = tf.range(start=0, limit=num_patches, delta=1)
+            return self.projection(patches) + self.position_embedding(positions)
+
+    inputs = layers.Input(shape=(28, 28, 1))
+    x = ShiftedPatches(patch_size, stride)(inputs)
+    x = PatchEncoder(num_patches, projection_dim)(x)
+
+    for _ in range(4):
+        x1 = layers.LayerNormalization(epsilon=1e-6)(x)
+        attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=projection_dim)(x1, x1)
+        x2 = layers.Add()([x, attn])
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        x3 = layers.Dense(128, activation='relu')(x3)
+        x3 = layers.Dense(projection_dim)(x3)
+        x = layers.Add()([x2, x3])
+
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation='relu')(x)
+    outputs = layers.Dense(10, activation='softmax')(x)
+    return models.Model(inputs, outputs)
+
+# Train and evaluate all models
+cnn_history, cnn_preds = run_model("CNN", cnn_model)
+vit_history, vit_preds = run_model("Vision Transformer", vit_model)
+local_history, local_preds = run_model("Local ViT", local_vit_model)
+
+# Plot accuracy and loss
+epochs = range(1, 11) # Corrected epochs range to match training history
+plt.figure(figsize=(14, 6))
+
+plt.subplot(1, 2, 1)
+plt.plot(epochs, cnn_history.history['val_accuracy'], label='CNN')
+plt.plot(epochs, vit_history.history['val_accuracy'], label='ViT')
+plt.plot(epochs, local_history.history['val_accuracy'], label='Local ViT')
+plt.title("Validation Accuracy per Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.grid(True)
+
+plt.subplot(1, 2, 2)
+plt.plot(epochs, cnn_history.history['val_loss'], label='CNN')
+plt.plot(epochs, vit_history.history['val_loss'], label='ViT')
+plt.plot(epochs, local_history.history['val_loss'], label='Local ViT')
+plt.title("Validation Loss per Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Confusion Matrices
+fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+for ax, preds, title in zip(
+    axs, [cnn_preds, vit_preds, local_preds], ['CNN', 'ViT', 'Local ViT']):
+    cm = confusion_matrix(y_test, preds)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=np.arange(10))
+    disp.plot(ax=ax, cmap='Blues', values_format='d')
+    ax.set_title(f'{title} Confusion Matrix')
+
+plt.tight_layout()
+plt.show()import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.datasets import mnist
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras import layers, models
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+
+# Load and preprocess MNIST
+(x_train, y_train), (x_test, y_test) = mnist.load_data()
+x_train = x_train.reshape(-1, 28, 28, 1).astype("float32") / 255.0
+x_test = x_test.reshape(-1, 28, 28, 1).astype("float32") / 255.0
+y_train_cat = to_categorical(y_train, 10)
+y_test_cat = to_categorical(y_test, 10)
+
+def run_model(name, model_fn):
+    print(f"\n=== Running {name} ===")
+    model = model_fn()
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+    history = model.fit(
+        x_train, y_train_cat,
+        batch_size=64,
+        epochs=10,
+        validation_split=0.1,
+        verbose=0
+    )
+
+    loss, acc = model.evaluate(x_test, y_test_cat, verbose=0)
+    y_pred = np.argmax(model.predict(x_test, verbose=0), axis=1)
+    print(f"{name} - Test Accuracy: {acc:.4f}, Loss: {loss:.4f}")
+    return history, y_pred
+
+# CNN Model
+def cnn_model():
+    model = models.Sequential([
+        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(28, 28, 1)),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(64, activation='relu'),
+        layers.Dense(10, activation='softmax')
+    ])
+    return model
+
+# Vision Transformer (ViT)
+def vit_model():
+    projection_dim = 64
+    num_heads = 4
+    patch_size = 7
+    num_patches = (28 // patch_size) ** 2
+
+    class Patches(layers.Layer):
+        def __init__(self, patch_size):
+            super().__init__()
+            self.patch_size = patch_size
+
+        def call(self, images):
+            patches = tf.image.extract_patches(
+                images=images,
+                sizes=[1, self.patch_size, self.patch_size, 1],
+                strides=[1, self.patch_size, self.patch_size, 1],
+                rates=[1, 1, 1, 1],
+                padding="VALID"
+            )
+            return tf.reshape(patches, [tf.shape(images)[0], -1, patches.shape[-1]])
+
+    class PatchEncoder(layers.Layer):
+        def __init__(self, num_patches, projection_dim):
+            super().__init__()
+            self.projection = layers.Dense(projection_dim)
+            self.position_embedding = layers.Embedding(input_dim=num_patches, output_dim=projection_dim)
+
+        def call(self, patches):
+            positions = tf.range(start=0, limit=num_patches, delta=1)
+            return self.projection(patches) + self.position_embedding(positions)
+
+    inputs = layers.Input(shape=(28, 28, 1))
+    x = Patches(patch_size)(inputs)
+    x = PatchEncoder(num_patches, projection_dim)(x)
+
+    for _ in range(4):
+        x1 = layers.LayerNormalization(epsilon=1e-6)(x)
+        attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=projection_dim)(x1, x1)
+        x2 = layers.Add()([x, attn])
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        x3 = layers.Dense(128, activation='relu')(x3)
+        x3 = layers.Dense(projection_dim)(x3)
+        x = layers.Add()([x2, x3])
+
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation='relu')(x)
+    outputs = layers.Dense(10, activation='softmax')(x)
+    return models.Model(inputs, outputs)
+
+# Local ViT with shifted patches
+def local_vit_model():
+    projection_dim = 64
+    patch_size = 7
+    stride = 4
+    num_heads = 4
+    num_patches = ((28 - patch_size) // stride + 1) ** 2
+
+    class ShiftedPatches(layers.Layer):
+        def __init__(self, patch_size, stride):
+            super().__init__()
+            self.patch_size = patch_size
+            self.stride = stride
+
+        def call(self, images):
+            patches = tf.image.extract_patches(
+                images=images,
+                sizes=[1, self.patch_size, self.patch_size, 1],
+                strides=[1, self.stride, self.stride, 1],
+                rates=[1, 1, 1, 1],
+                padding="VALID"
+            )
+            return tf.reshape(patches, [tf.shape(images)[0], -1, patches.shape[-1]])
+
+    class PatchEncoder(layers.Layer):
+        def __init__(self, num_patches, projection_dim):
+            super().__init__()
+            self.projection = layers.Dense(projection_dim)
+            self.position_embedding = layers.Embedding(input_dim=num_patches, output_dim=projection_dim)
+
+        def call(self, patches):
+            positions = tf.range(start=0, limit=num_patches, delta=1)
+            return self.projection(patches) + self.position_embedding(positions)
+
+    inputs = layers.Input(shape=(28, 28, 1))
+    x = ShiftedPatches(patch_size, stride)(inputs)
+    x = PatchEncoder(num_patches, projection_dim)(x)
+
+    for _ in range(4):
+        x1 = layers.LayerNormalization(epsilon=1e-6)(x)
+        attn = layers.MultiHeadAttention(num_heads=num_heads, key_dim=projection_dim)(x1, x1)
+        x2 = layers.Add()([x, attn])
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        x3 = layers.Dense(128, activation='relu')(x3)
+        x3 = layers.Dense(projection_dim)(x3)
+        x = layers.Add()([x2, x3])
+
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation='relu')(x)
+    outputs = layers.Dense(10, activation='softmax')(x)
+    return models.Model(inputs, outputs)
+
+# Train and evaluate all models
+cnn_history, cnn_preds = run_model("CNN", cnn_model)
+vit_history, vit_preds = run_model("Vision Transformer", vit_model)
+local_history, local_preds = run_model("Local ViT", local_vit_model)
+
+# Plot accuracy and loss
+epochs = range(1, 11) # Corrected epochs range to match training history
+plt.figure(figsize=(14, 6))
+
+plt.subplot(1, 2, 1)
+plt.plot(epochs, cnn_history.history['val_accuracy'], label='CNN')
+plt.plot(epochs, vit_history.history['val_accuracy'], label='ViT')
+plt.plot(epochs, local_history.history['val_accuracy'], label='Local ViT')
+plt.title("Validation Accuracy per Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.grid(True)
+
+plt.subplot(1, 2, 2)
+plt.plot(epochs, cnn_history.history['val_loss'], label='CNN')
+plt.plot(epochs, vit_history.history['val_loss'], label='ViT')
+plt.plot(epochs, local_history.history['val_loss'], label='Local ViT')
+plt.title("Validation Loss per Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Confusion Matrices
+fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+for ax, preds, title in zip(
+    axs, [cnn_preds, vit_preds, local_preds], ['CNN', 'ViT', 'Local ViT']):
+    cm = confusion_matrix(y_test, preds)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=np.arange(10))
+    disp.plot(ax=ax, cmap='Blues', values_format='d')
+    ax.set_title(f'{title} Confusion Matrix')
+
+plt.tight_layout()
+plt.show()
+
